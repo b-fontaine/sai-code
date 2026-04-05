@@ -1,4 +1,7 @@
 {
+  "permissions": {
+    "allow": []
+  },
   "enabledPlugins": {
     "oh-my-claudecode@omc": true,
     "superpowers@claude-plugins-official": true,
