@@ -4,6 +4,7 @@ members = [
     "crates/sai-core",
     "crates/sai-llm",
     "crates/sai-tools",
+    "crates/sai-cli",
 ]
 
 [workspace.package]
