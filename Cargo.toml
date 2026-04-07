@@ -5,6 +5,7 @@ members = [
     "crates/sai-llm",
     "crates/sai-tools",
     "crates/sai-cli",
+    "crates/sai-tui",
 ]
 
 [workspace.package]
@@ -50,6 +51,7 @@ tempfile = "3"
 
 # Internal crates
 sai-core = { path = "crates/sai-core" }
+sai-tui = { path = "crates/sai-tui" }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

@@ -36,8 +36,23 @@ impl Default for ReplConfig {
     }
 }
 
-/// Entry point: wire all adapters and start the REPL.
+/// Entry point: wire all adapters and start the REPL using the default
+/// plain-text terminal adapters.
 pub async fn run(cli: Cli) -> Result<()> {
+    let ui = Box::new(TerminalUi);
+    let permissions = Box::new(TerminalPermissions::new());
+    run_with_ports(cli, ui, permissions).await
+}
+
+/// Entry point with pre-constructed port adapters.
+///
+/// This allows callers (e.g. the TUI) to supply their own `UiPort` and
+/// `PermissionPort` implementations while reusing the full REPL loop logic.
+pub async fn run_with_ports(
+    cli: Cli,
+    ui: Box<dyn sai_core::ports::ui::UiPort>,
+    permissions: Box<dyn sai_core::ports::permissions::PermissionPort>,
+) -> Result<()> {
     let model = &cli.model;
 
     // Validate and create LLM adapter (fail early on bad model name)
@@ -55,14 +70,17 @@ pub async fn run(cli: Cli) -> Result<()> {
         ..AgentConfig::default()
     };
 
-    let ui = TerminalUi;
-    let permissions = TerminalPermissions::new();
-
     // Display startup banner
     banner::display_banner(model, &cwd);
 
     // Create the agent loop (owns session history across all turns)
-    let mut agent = AgentLoop::new(agent_config, &llm, &tools, &ui, &permissions);
+    let mut agent = AgentLoop::new(
+        agent_config,
+        &llm,
+        &tools,
+        ui.as_ref(),
+        permissions.as_ref(),
+    );
     let repl_config = ReplConfig::default();
 
     // If an initial message was provided via CLI arg, run it as the first turn
