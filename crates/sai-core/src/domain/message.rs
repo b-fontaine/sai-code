@@ -43,9 +43,7 @@ impl Message {
     /// Create a new assistant message with text-only content.
     pub fn assistant_text(text: impl Into<String>) -> Self {
         Self::Assistant {
-            content: vec![ContentBlock::Text {
-                text: text.into(),
-            }],
+            content: vec![ContentBlock::Text { text: text.into() }],
             stop_reason: StopReason::EndTurn,
         }
     }

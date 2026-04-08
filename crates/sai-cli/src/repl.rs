@@ -5,10 +5,14 @@ use std::io::Write as _;
 use std::time::Instant;
 
 use sai_core::domain::config::AgentConfig;
+use sai_core::domain::session::SessionMeta;
 use sai_core::error::{AgentError, LlmError};
 use sai_core::services::agent_loop::AgentLoop;
 use sai_llm::GenaiLlmAdapter;
+use sai_session::FilesystemSessionAdapter;
 use sai_tools::{InMemoryToolRegistry, ToolConfig};
+
+use crate::sessions::{load_for_resume, ResumeResult};
 
 use crate::banner;
 use crate::cli::Cli;
@@ -48,6 +52,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 ///
 /// This allows callers (e.g. the TUI) to supply their own `UiPort` and
 /// `PermissionPort` implementations while reusing the full REPL loop logic.
+#[allow(clippy::too_many_lines)]
 pub async fn run_with_ports(
     cli: Cli,
     ui: Box<dyn sai_core::ports::ui::UiPort>,
@@ -73,14 +78,93 @@ pub async fn run_with_ports(
     // Display startup banner
     banner::display_banner(model, &cwd);
 
-    // Create the agent loop (owns session history across all turns)
-    let mut agent = AgentLoop::new(
-        agent_config,
-        &llm,
-        &tools,
-        ui.as_ref(),
-        permissions.as_ref(),
-    );
+    // Create session persistence adapter
+    let session_adapter = FilesystemSessionAdapter::new();
+
+    // Resolve resume / new session
+    let (agent, session_meta) = if let Some(ref resume_arg) = cli.resume {
+        // --resume was passed; empty string means "most recent in cwd"
+        let resume_id = if resume_arg.is_empty() {
+            None
+        } else {
+            Some(resume_arg.as_str())
+        };
+        match load_for_resume(resume_id, &cwd).await? {
+            ResumeResult::Loaded {
+                session_id,
+                messages,
+                turn_count,
+            } => {
+                let mut stderr = std::io::stderr();
+                let _ = writeln!(
+                    stderr,
+                    "Resumed session {} ({} turn{}, {})",
+                    session_id,
+                    turn_count,
+                    if turn_count == 1 { "" } else { "s" },
+                    format_relative_now(&chrono::Utc::now()),
+                );
+                let session_meta = SessionMeta {
+                    id: session_id,
+                    name: cli.session_name.clone(),
+                    model_name: model.clone(),
+                    working_dir: cwd.clone(),
+                    created_at: chrono::Utc::now(),
+                    last_active_at: chrono::Utc::now(),
+                    turn_count,
+                };
+                let a = AgentLoop::resume(
+                    agent_config,
+                    session_id,
+                    messages,
+                    &llm,
+                    &tools,
+                    ui.as_ref(),
+                    permissions.as_ref(),
+                    &session_adapter,
+                );
+                (a, session_meta)
+            }
+            ResumeResult::NotFound => {
+                // Start fresh (--resume without a match is not an error)
+                let session_id = uuid::Uuid::new_v4();
+                let session_meta = SessionMeta {
+                    id: session_id,
+                    name: cli.session_name.clone(),
+                    model_name: model.clone(),
+                    working_dir: cwd.clone(),
+                    created_at: chrono::Utc::now(),
+                    last_active_at: chrono::Utc::now(),
+                    turn_count: 0,
+                };
+                let a = AgentLoop::new(
+                    agent_config,
+                    &llm,
+                    &tools,
+                    ui.as_ref(),
+                    permissions.as_ref(),
+                    &session_adapter,
+                );
+                (a, session_meta)
+            }
+        }
+    } else {
+        // Fresh session
+        let session_id = uuid::Uuid::new_v4();
+        let mut session_meta = SessionMeta::new(session_id, model.clone(), cwd.clone());
+        session_meta.name.clone_from(&cli.session_name);
+        let a = AgentLoop::new(
+            agent_config,
+            &llm,
+            &tools,
+            ui.as_ref(),
+            permissions.as_ref(),
+            &session_adapter,
+        );
+        (a, session_meta)
+    };
+
+    let mut agent = agent.with_session_meta(session_meta);
     let repl_config = ReplConfig::default();
 
     // If an initial message was provided via CLI arg, run it as the first turn
@@ -173,4 +257,18 @@ async fn run_turn_with_recovery(agent: &mut AgentLoop<'_>, message: &str) {
 fn print_farewell(message: &str) {
     let mut stderr = std::io::stderr();
     let _ = writeln!(stderr, "{message}");
+}
+
+fn format_relative_now(dt: &chrono::DateTime<chrono::Utc>) -> String {
+    let now = chrono::Utc::now();
+    let diff = now.signed_duration_since(*dt);
+    if diff.num_seconds() < 60 {
+        "just now".to_string()
+    } else if diff.num_hours() < 1 {
+        format!("{} min ago", diff.num_minutes())
+    } else if diff.num_days() < 1 {
+        format!("{} hours ago", diff.num_hours())
+    } else {
+        dt.format("%Y-%m-%d").to_string()
+    }
 }

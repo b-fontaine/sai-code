@@ -6,6 +6,7 @@ members = [
     "crates/sai-tools",
     "crates/sai-cli",
     "crates/sai-tui",
+    "crates/sai-session",
 ]
 
 [workspace.package]
@@ -46,11 +47,18 @@ grep-regex = "0.1"
 grep-searcher = "0.1"
 grep-matcher = "0.1"
 
+# Platform data directories
+dirs = "5"
+
+# Date/time with serde support
+chrono = { version = "0.4", features = ["serde"] }
+
 # Testing
 tempfile = "3"
 
 # Internal crates
 sai-core = { path = "crates/sai-core" }
+sai-session = { path = "crates/sai-session" }
 sai-tui = { path = "crates/sai-tui" }
 
 [workspace.lints.clippy]

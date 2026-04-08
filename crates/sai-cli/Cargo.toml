@@ -15,9 +15,14 @@ sai-core.workspace = true
 sai-llm = { path = "../sai-llm" }
 sai-tools = { path = "../sai-tools" }
 sai-tui.workspace = true
+sai-session.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
+uuid.workspace = true
 color-eyre = "0.6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

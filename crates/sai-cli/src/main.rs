@@ -4,6 +4,7 @@ mod banner;
 mod cli;
 mod input;
 mod repl;
+mod sessions;
 mod terminal_permissions;
 mod terminal_ui;
 
@@ -23,6 +24,17 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = cli::Cli::parse_args();
+
+    // Dispatch session management subcommands before entering the REPL
+    if let Some(cli::SessionCommand::Sessions { action }) = cli.command {
+        return match action {
+            cli::SessionAction::List { dir, limit } => sessions::cmd_list(dir, limit).await,
+            cli::SessionAction::Show { session_id } => sessions::cmd_show(&session_id).await,
+            cli::SessionAction::Delete { session_id, all } => {
+                sessions::cmd_delete(session_id.as_deref(), all).await
+            }
+        };
+    }
 
     if std::io::stdin().is_terminal() {
         // Interactive mode: use the rich TUI interface.

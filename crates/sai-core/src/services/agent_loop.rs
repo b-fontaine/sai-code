@@ -7,11 +7,12 @@
 use crate::domain::config::AgentConfig;
 use crate::domain::event::AgentEvent;
 use crate::domain::message::{ContentBlock, Message, StopReason};
-use crate::domain::session::AgentSession;
+use crate::domain::session::{AgentSession, ConversationTurn, SessionMeta};
 use crate::domain::tool_call::ToolCall;
 use crate::error::{AgentError, LlmError};
 use crate::ports::llm::{ChatRequest, ChatStreamEvent, LlmPort};
 use crate::ports::permissions::PermissionPort;
+use crate::ports::session::SessionPort;
 use crate::ports::tool::ToolRegistryPort;
 use crate::ports::ui::UiPort;
 use crate::services::tool_executor::ToolExecutor;
@@ -29,6 +30,11 @@ pub struct AgentLoop<'a> {
     tools: &'a dyn ToolRegistryPort,
     ui: &'a dyn UiPort,
     permissions: &'a dyn PermissionPort,
+    session_port: &'a dyn SessionPort,
+    /// Set to `true` after the first turn to avoid redundant `create_session` calls.
+    session_created: bool,
+    /// Track session metadata for persistence (model name, working dir).
+    session_meta: Option<SessionMeta>,
 }
 
 /// The outcome of a single conversation turn.
@@ -46,6 +52,7 @@ impl<'a> AgentLoop<'a> {
         tools: &'a dyn ToolRegistryPort,
         ui: &'a dyn UiPort,
         permissions: &'a dyn PermissionPort,
+        session_port: &'a dyn SessionPort,
     ) -> Self {
         Self {
             session: AgentSession::new(config),
@@ -53,17 +60,62 @@ impl<'a> AgentLoop<'a> {
             tools,
             ui,
             permissions,
+            session_port,
+            session_created: false,
+            session_meta: None,
         }
+    }
+
+    /// Create an agent loop that resumes a prior persisted session.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resume(
+        config: AgentConfig,
+        session_id: uuid::Uuid,
+        prior_messages: Vec<Message>,
+        llm: &'a dyn LlmPort,
+        tools: &'a dyn ToolRegistryPort,
+        ui: &'a dyn UiPort,
+        permissions: &'a dyn PermissionPort,
+        session_port: &'a dyn SessionPort,
+    ) -> Self {
+        Self {
+            session: AgentSession::resume(config, session_id, prior_messages),
+            llm,
+            tools,
+            ui,
+            permissions,
+            session_port,
+            // Mark as already created so save_turn can run without create_session
+            session_created: true,
+            session_meta: None,
+        }
+    }
+
+    /// Attach session metadata used when persisting sessions.
+    #[must_use]
+    pub fn with_session_meta(mut self, meta: SessionMeta) -> Self {
+        self.session_meta = Some(meta);
+        self
     }
 
     /// Run a single conversation turn.
     ///
     /// Sends the user message to the model, handles tool calls in a loop,
-    /// and returns the final text response.
+    /// and returns the final text response. On success, the completed turn
+    /// is persisted via the `SessionPort`.
     pub async fn run_turn(&mut self, user_message: &str) -> Result<TurnResult, AgentError> {
-        self.session
-            .messages
-            .push(Message::user(user_message));
+        // Ensure the session is registered with the persistence layer
+        if !self.session_created {
+            if let Some(ref meta) = self.session_meta.clone() {
+                let _ = self.session_port.create_session(meta.clone()).await;
+            }
+            self.session_created = true;
+        }
+
+        let turn_index = self.session.messages.len() / 2; // approximate
+        let messages_before = self.session.messages.len();
+
+        self.session.messages.push(Message::user(user_message));
 
         let mut iteration = 0;
 
@@ -92,6 +144,8 @@ impl<'a> AgentLoop<'a> {
             if content_blocks.is_empty() {
                 self.ui.emit_event(AgentEvent::TurnComplete).await;
                 self.check_history_size().await;
+                self.persist_turn(turn_index, user_message, messages_before)
+                    .await;
                 return Ok(TurnResult { text: None });
             }
 
@@ -104,6 +158,8 @@ impl<'a> AgentLoop<'a> {
                 // No tool calls — end of turn
                 self.ui.emit_event(AgentEvent::TurnComplete).await;
                 self.check_history_size().await;
+                self.persist_turn(turn_index, user_message, messages_before)
+                    .await;
                 return Ok(TurnResult { text });
             }
 
@@ -140,6 +196,23 @@ impl<'a> AgentLoop<'a> {
         }
     }
 
+    /// Persist a completed turn to the session storage layer.
+    ///
+    /// Failures are logged and swallowed — a persistence error MUST NOT
+    /// interrupt the interactive session.
+    async fn persist_turn(&self, turn_index: usize, user_message: &str, messages_before: usize) {
+        let turn_messages = self.session.messages[messages_before..].to_vec();
+        let turn = ConversationTurn {
+            turn_index,
+            user_message: user_message.to_string(),
+            messages: turn_messages,
+            completed_at: chrono::Utc::now(),
+        };
+        if let Err(e) = self.session_port.save_turn(self.session.id, turn).await {
+            tracing::warn!(error = %e, "Failed to persist conversation turn");
+        }
+    }
+
     /// Build a `ChatRequest` from the current session state.
     fn build_request(&self) -> ChatRequest {
         let mut request = ChatRequest::new(self.session.messages.clone());
@@ -162,10 +235,7 @@ impl<'a> AgentLoop<'a> {
         let mut stop_reason = StopReason::EndTurn;
 
         loop {
-            let event = std::future::poll_fn(|cx| {
-                stream.as_mut().poll_next(cx)
-            })
-            .await;
+            let event = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
 
             match event {
                 Some(Ok(ChatStreamEvent::StreamStart)) => {}
@@ -218,11 +288,12 @@ impl<'a> AgentLoop<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ToolError;
     use crate::ports::llm::MockLlmPort;
     use crate::ports::permissions::{MockPermissionPort, PermissionDecision};
+    use crate::ports::session::{MockSessionPort, NoOpSessionPort};
     use crate::ports::tool::{ToolOutput, ToolPort};
     use crate::ports::ui::MockUiPort;
-    use crate::error::ToolError;
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
 
@@ -245,7 +316,10 @@ mod tests {
 
     impl ToolRegistryPort for MockToolRegistry {
         fn get(&self, name: &str) -> Option<&dyn ToolPort> {
-            self.tools.iter().find(|t| t.name() == name).map(|t| t.as_ref())
+            self.tools
+                .iter()
+                .find(|t| t.name() == name)
+                .map(|t| t.as_ref())
         }
 
         fn list(&self) -> Vec<&dyn ToolPort> {
@@ -336,6 +410,10 @@ mod tests {
         perms
     }
 
+    fn setup_session_port() -> NoOpSessionPort {
+        NoOpSessionPort
+    }
+
     // ===== US1 Tests =====
 
     #[tokio::test]
@@ -353,14 +431,23 @@ mod tests {
                 ]))
             })
         });
-        llm.expect_model_name().return_const("test-model".to_string());
+        llm.expect_model_name()
+            .return_const("test-model".to_string());
         llm.expect_provider_name().return_const("test".to_string());
 
         let registry = MockToolRegistry::new();
         let ui = setup_ui();
         let perms = setup_permissions_allow();
 
-        let mut agent = AgentLoop::new(AgentConfig::default(), &llm, &registry, &ui, &perms);
+        let session_port = setup_session_port();
+        let mut agent = AgentLoop::new(
+            AgentConfig::default(),
+            &llm,
+            &registry,
+            &ui,
+            &perms,
+            &session_port,
+        );
         let result = agent.run_turn("Hi").await.unwrap();
 
         assert_eq!(result.text, Some("Hello world!".to_string()));
@@ -385,7 +472,8 @@ mod tests {
                 ]))
             })
         });
-        llm.expect_model_name().return_const("test-model".to_string());
+        llm.expect_model_name()
+            .return_const("test-model".to_string());
         llm.expect_provider_name().return_const("test".to_string());
 
         let mut ui = MockUiPort::new();
@@ -401,7 +489,15 @@ mod tests {
         let registry = MockToolRegistry::new();
         let perms = setup_permissions_allow();
 
-        let mut agent = AgentLoop::new(AgentConfig::default(), &llm, &registry, &ui, &perms);
+        let session_port = setup_session_port();
+        let mut agent = AgentLoop::new(
+            AgentConfig::default(),
+            &llm,
+            &registry,
+            &ui,
+            &perms,
+            &session_port,
+        );
         agent.run_turn("Hi").await.unwrap();
 
         let deltas = events_received.lock().unwrap();
@@ -421,14 +517,23 @@ mod tests {
                 ]))
             })
         });
-        llm.expect_model_name().return_const("test-model".to_string());
+        llm.expect_model_name()
+            .return_const("test-model".to_string());
         llm.expect_provider_name().return_const("test".to_string());
 
         let registry = MockToolRegistry::new();
         let ui = setup_ui();
         let perms = setup_permissions_allow();
 
-        let mut agent = AgentLoop::new(AgentConfig::default(), &llm, &registry, &ui, &perms);
+        let session_port = setup_session_port();
+        let mut agent = AgentLoop::new(
+            AgentConfig::default(),
+            &llm,
+            &registry,
+            &ui,
+            &perms,
+            &session_port,
+        );
         let result = agent.run_turn("Hi").await.unwrap();
 
         assert!(result.text.is_none());
@@ -470,15 +575,23 @@ mod tests {
                 }
             })
         });
-        llm.expect_model_name().return_const("test-model".to_string());
+        llm.expect_model_name()
+            .return_const("test-model".to_string());
         llm.expect_provider_name().return_const("test".to_string());
 
-        let registry = MockToolRegistry::new()
-            .with_tool(DummyTool::new("read_file", "hello"));
+        let registry = MockToolRegistry::new().with_tool(DummyTool::new("read_file", "hello"));
         let ui = setup_ui();
         let perms = setup_permissions_allow();
 
-        let mut agent = AgentLoop::new(AgentConfig::default(), &llm, &registry, &ui, &perms);
+        let session_port = setup_session_port();
+        let mut agent = AgentLoop::new(
+            AgentConfig::default(),
+            &llm,
+            &registry,
+            &ui,
+            &perms,
+            &session_port,
+        );
         let result = agent.run_turn("Read test.txt").await.unwrap();
 
         assert_eq!(result.text, Some("File content: hello".to_string()));
@@ -518,14 +631,23 @@ mod tests {
                 }
             })
         });
-        llm.expect_model_name().return_const("test-model".to_string());
+        llm.expect_model_name()
+            .return_const("test-model".to_string());
         llm.expect_provider_name().return_const("test".to_string());
 
         let registry = MockToolRegistry::new(); // no tools registered
         let ui = setup_ui();
         let perms = setup_permissions_allow();
 
-        let mut agent = AgentLoop::new(AgentConfig::default(), &llm, &registry, &ui, &perms);
+        let session_port = setup_session_port();
+        let mut agent = AgentLoop::new(
+            AgentConfig::default(),
+            &llm,
+            &registry,
+            &ui,
+            &perms,
+            &session_port,
+        );
         // Should NOT panic — error is sent back to model
         let result = agent.run_turn("Use nonexistent").await.unwrap();
         assert!(result.text.is_some());
@@ -565,11 +687,12 @@ mod tests {
                 }
             })
         });
-        llm.expect_model_name().return_const("test-model".to_string());
+        llm.expect_model_name()
+            .return_const("test-model".to_string());
         llm.expect_provider_name().return_const("test".to_string());
 
-        let registry = MockToolRegistry::new()
-            .with_tool(DummyTool::new("dangerous_tool", "should not run"));
+        let registry =
+            MockToolRegistry::new().with_tool(DummyTool::new("dangerous_tool", "should not run"));
         let ui = setup_ui();
 
         let mut perms = MockPermissionPort::new();
@@ -577,7 +700,15 @@ mod tests {
             .expect_check()
             .returning(|_| Box::pin(async { PermissionDecision::Deny("not allowed".into()) }));
 
-        let mut agent = AgentLoop::new(AgentConfig::default(), &llm, &registry, &ui, &perms);
+        let session_port = setup_session_port();
+        let mut agent = AgentLoop::new(
+            AgentConfig::default(),
+            &llm,
+            &registry,
+            &ui,
+            &perms,
+            &session_port,
+        );
         let result = agent.run_turn("Do dangerous thing").await.unwrap();
         assert!(result.text.is_some());
     }
@@ -618,15 +749,23 @@ mod tests {
                 }
             })
         });
-        llm.expect_model_name().return_const("test-model".to_string());
+        llm.expect_model_name()
+            .return_const("test-model".to_string());
         llm.expect_provider_name().return_const("test".to_string());
 
-        let registry = MockToolRegistry::new()
-            .with_tool(DummyTool::new("read_file", "content"));
+        let registry = MockToolRegistry::new().with_tool(DummyTool::new("read_file", "content"));
         let ui = setup_ui();
         let perms = setup_permissions_allow();
 
-        let mut agent = AgentLoop::new(AgentConfig::default(), &llm, &registry, &ui, &perms);
+        let session_port = setup_session_port();
+        let mut agent = AgentLoop::new(
+            AgentConfig::default(),
+            &llm,
+            &registry,
+            &ui,
+            &perms,
+            &session_port,
+        );
         let result = agent.run_turn("Do 3 things").await.unwrap();
 
         assert_eq!(result.text, Some("Done after 3 tools.".to_string()));
@@ -650,17 +789,18 @@ mod tests {
                 ]))
             })
         });
-        llm.expect_model_name().return_const("test-model".to_string());
+        llm.expect_model_name()
+            .return_const("test-model".to_string());
         llm.expect_provider_name().return_const("test".to_string());
 
-        let registry = MockToolRegistry::new()
-            .with_tool(DummyTool::new("looper", "looped"));
+        let registry = MockToolRegistry::new().with_tool(DummyTool::new("looper", "looped"));
         let ui = setup_ui();
         let perms = setup_permissions_allow();
 
         let mut config = AgentConfig::default();
         config.max_iterations_per_turn = 3;
-        let mut agent = AgentLoop::new(config, &llm, &registry, &ui, &perms);
+        let session_port = setup_session_port();
+        let mut agent = AgentLoop::new(config, &llm, &registry, &ui, &perms, &session_port);
         let result = agent.run_turn("Loop forever").await;
 
         assert!(matches!(
@@ -699,14 +839,23 @@ mod tests {
                 ]))
             })
         });
-        llm.expect_model_name().return_const("test-model".to_string());
+        llm.expect_model_name()
+            .return_const("test-model".to_string());
         llm.expect_provider_name().return_const("test".to_string());
 
         let registry = MockToolRegistry::new();
         let ui = setup_ui();
         let perms = setup_permissions_allow();
 
-        let mut agent = AgentLoop::new(AgentConfig::default(), &llm, &registry, &ui, &perms);
+        let session_port = setup_session_port();
+        let mut agent = AgentLoop::new(
+            AgentConfig::default(),
+            &llm,
+            &registry,
+            &ui,
+            &perms,
+            &session_port,
+        );
 
         agent.run_turn("First message").await.unwrap();
         agent.run_turn("Second message").await.unwrap();
@@ -731,7 +880,8 @@ mod tests {
                 ]))
             })
         });
-        llm.expect_model_name().return_const("test-model".to_string());
+        llm.expect_model_name()
+            .return_const("test-model".to_string());
         llm.expect_provider_name().return_const("test".to_string());
 
         let mut ui = MockUiPort::new();
@@ -750,7 +900,8 @@ mod tests {
         let mut config = AgentConfig::default();
         config.max_history_messages = 1; // trigger warning after 1 message
 
-        let mut agent = AgentLoop::new(config, &llm, &registry, &ui, &perms);
+        let session_port = setup_session_port();
+        let mut agent = AgentLoop::new(config, &llm, &registry, &ui, &perms, &session_port);
         agent.run_turn("Fill history").await.unwrap();
 
         assert!(*warning_received.lock().unwrap());

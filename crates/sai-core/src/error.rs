@@ -70,6 +70,41 @@ pub enum ToolError {
     InvalidInput(String),
 }
 
+/// Errors from the session persistence layer.
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    /// No session exists with the given ID.
+    #[error("session not found: {id}")]
+    NotFound {
+        /// The session UUID that was not found.
+        id: uuid::Uuid,
+    },
+
+    /// A session with the requested name already exists.
+    #[error("session name conflict: '{name}' is already in use")]
+    NameConflict {
+        /// The conflicting name.
+        name: String,
+    },
+
+    /// The session data on disk is unreadable or structurally invalid.
+    #[error("session {id} is corrupted: {reason}")]
+    Corrupted {
+        /// The session UUID whose data is corrupted.
+        id: uuid::Uuid,
+        /// Human-readable description of what is wrong.
+        reason: String,
+    },
+
+    /// An underlying I/O error occurred.
+    #[error("session I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// A JSON serialization or deserialization error occurred.
+    #[error("session serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
+}
+
 impl LlmError {
     /// Returns true if this error is transient and the request can be retried.
     pub fn is_retryable(&self) -> bool {
@@ -86,4 +121,3 @@ impl LlmError {
         }
     }
 }
-

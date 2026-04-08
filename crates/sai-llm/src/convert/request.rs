@@ -1,16 +1,14 @@
 //! Convert sai-core request types to genai request types.
 
-use genai::chat::{ChatMessage as GenaiMessage, ChatRequest as GenaiChatRequest, Tool as GenaiTool, ToolResponse};
+use genai::chat::{
+    ChatMessage as GenaiMessage, ChatRequest as GenaiChatRequest, Tool as GenaiTool, ToolResponse,
+};
 use sai_core::domain::message::{ContentBlock, Message};
 use sai_core::ports::llm::ChatRequest;
 
 /// Convert a `sai_core::ChatRequest` into a `genai::ChatRequest`.
 pub(crate) fn to_genai_request(request: &ChatRequest) -> GenaiChatRequest {
-    let messages: Vec<GenaiMessage> = request
-        .messages
-        .iter()
-        .flat_map(convert_message)
-        .collect();
+    let messages: Vec<GenaiMessage> = request.messages.iter().flat_map(convert_message).collect();
 
     let mut genai_req = GenaiChatRequest::new(messages);
 
@@ -131,8 +129,7 @@ mod tests {
 
     #[test]
     fn system_prompt_included() {
-        let request =
-            ChatRequest::new(vec![Message::user("Hi")]).with_system_prompt("Be helpful");
+        let request = ChatRequest::new(vec![Message::user("Hi")]).with_system_prompt("Be helpful");
         let genai_req = to_genai_request(&request);
         assert!(genai_req.system.is_some());
     }

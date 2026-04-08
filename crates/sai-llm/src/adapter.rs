@@ -89,8 +89,7 @@ impl LlmPort for GenaiLlmAdapter {
             while let Some(event_result) = stream.next().await {
                 match event_result {
                     Ok(genai_event) => {
-                        let sai_events =
-                            convert::response::convert_stream_event(genai_event);
+                        let sai_events = convert::response::convert_stream_event(genai_event);
                         for sai_event in sai_events {
                             if tx.send(Ok(sai_event)).await.is_err() {
                                 return; // receiver dropped

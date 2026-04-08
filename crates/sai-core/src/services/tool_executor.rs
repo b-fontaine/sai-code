@@ -146,10 +146,7 @@ impl<'a> ToolExecutor<'a> {
                         summary: format!("permission denied: {reason}"),
                     })
                     .await;
-                return ToolResult::error(
-                    &tool_call.id,
-                    format!("permission denied: {reason}"),
-                );
+                return ToolResult::error(&tool_call.id, format!("permission denied: {reason}"));
             }
             PermissionDecision::Ask => {
                 // For now, treat Ask as Deny until UI prompt is implemented
@@ -225,10 +222,10 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ToolError;
     use crate::ports::permissions::MockPermissionPort;
     use crate::ports::tool::ToolPort;
     use crate::ports::ui::MockUiPort;
-    use crate::error::ToolError;
     use async_trait::async_trait;
 
     // Reuse helpers from agent_loop tests
@@ -248,7 +245,10 @@ mod tests {
 
     impl ToolRegistryPort for TestToolRegistry {
         fn get(&self, name: &str) -> Option<&dyn ToolPort> {
-            self.tools.iter().find(|t| t.name() == name).map(|t| t.as_ref())
+            self.tools
+                .iter()
+                .find(|t| t.name() == name)
+                .map(|t| t.as_ref())
         }
         fn list(&self) -> Vec<&dyn ToolPort> {
             self.tools.iter().map(|t| t.as_ref()).collect()
@@ -266,22 +266,36 @@ mod tests {
 
     #[async_trait]
     impl ToolPort for SimpleTool {
-        fn name(&self) -> &str { &self.name }
-        fn description(&self) -> &str { "test" }
-        fn input_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn description(&self) -> &str {
+            "test"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
         async fn execute(&self, _: serde_json::Value) -> Result<ToolOutput, ToolError> {
             Ok(ToolOutput::Success(self.output.clone()))
         }
-        fn is_concurrency_safe(&self) -> bool { self.safe }
+        fn is_concurrency_safe(&self) -> bool {
+            self.safe
+        }
     }
 
     struct FailingTool;
 
     #[async_trait]
     impl ToolPort for FailingTool {
-        fn name(&self) -> &str { "fail_tool" }
-        fn description(&self) -> &str { "always fails" }
-        fn input_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+        fn name(&self) -> &str {
+            "fail_tool"
+        }
+        fn description(&self) -> &str {
+            "always fails"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
         async fn execute(&self, _: serde_json::Value) -> Result<ToolOutput, ToolError> {
             Err(ToolError::Execution("boom".into()))
         }
@@ -295,7 +309,8 @@ mod tests {
 
     fn setup_perms_allow() -> MockPermissionPort {
         let mut p = MockPermissionPort::new();
-        p.expect_check().returning(|_| Box::pin(async { PermissionDecision::Allow }));
+        p.expect_check()
+            .returning(|_| Box::pin(async { PermissionDecision::Allow }));
         p
     }
 
@@ -319,7 +334,10 @@ mod tests {
             .await;
 
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].status, crate::domain::tool_call::ToolResultStatus::Success);
+        assert_eq!(
+            results[0].status,
+            crate::domain::tool_call::ToolResultStatus::Success
+        );
         assert_eq!(results[0].content, "hello!");
     }
 
@@ -339,7 +357,10 @@ mod tests {
             .await;
 
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].status, crate::domain::tool_call::ToolResultStatus::Error);
+        assert_eq!(
+            results[0].status,
+            crate::domain::tool_call::ToolResultStatus::Error
+        );
         assert!(results[0].content.contains("boom"));
     }
 
@@ -367,7 +388,10 @@ mod tests {
             .await;
 
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].status, crate::domain::tool_call::ToolResultStatus::Error);
+        assert_eq!(
+            results[0].status,
+            crate::domain::tool_call::ToolResultStatus::Error
+        );
         assert!(results[0].content.contains("permission denied"));
     }
 
@@ -395,9 +419,21 @@ mod tests {
         let executor = ToolExecutor::new(&registry, &perms, &ui, 10);
 
         let calls = vec![
-            ToolCall { id: "1".into(), name: "safe_a".into(), input: serde_json::json!({}) },
-            ToolCall { id: "2".into(), name: "unsafe_c".into(), input: serde_json::json!({}) },
-            ToolCall { id: "3".into(), name: "safe_b".into(), input: serde_json::json!({}) },
+            ToolCall {
+                id: "1".into(),
+                name: "safe_a".into(),
+                input: serde_json::json!({}),
+            },
+            ToolCall {
+                id: "2".into(),
+                name: "unsafe_c".into(),
+                input: serde_json::json!({}),
+            },
+            ToolCall {
+                id: "3".into(),
+                name: "safe_b".into(),
+                input: serde_json::json!({}),
+            },
         ];
 
         let results = executor.execute(calls).await;

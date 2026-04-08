@@ -5,5 +5,6 @@
 
 pub mod llm;
 pub mod permissions;
+pub mod session;
 pub mod tool;
 pub mod ui;

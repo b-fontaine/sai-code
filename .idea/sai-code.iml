@@ -10,6 +10,8 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/sai-tools/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/sai-tools/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/crates/sai-tui/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/sai-session/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/sai-session/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />
